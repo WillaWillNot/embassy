@@ -105,7 +105,15 @@ impl<'d> Unpin for ExtiInput<'d> {}
 
 impl<'d> ExtiInput<'d> {
     /// Create an EXTI input.
-    pub fn new<T: GpioPin>(pin: Peri<'d, T>, ch: Peri<'d, T::ExtiChannel>, pull: Pull) -> Self {
+    pub fn new<P: GpioPin<ExtiChannel: Channel>, I: Instance + Channel>(
+        pin: Peri<'d, P>,
+        ch: Peri<'d, I>,
+        pull: Pull,
+        _irq: impl interrupt::typelevel::Binding<I::Interrupt, InterruptHandler<I::Interrupt>> + 'd,
+    ) -> Self
+    where
+        I: Into<P::ExtiChannel>,
+    {
         // Needed if using AnyPin+AnyChannel.
         assert_eq!(pin.pin(), ch.number());
 
@@ -302,7 +310,7 @@ macro_rules! foreach_exti_irq {
             (EXTI15) => { $action!(EXTI15); };
 
             // plus the weird ones
-            (EXTI0_1)   => { $action!( EXTI0_1 ); };
+            (EXTI0_1)   => { $action!(EXTI0_1); };
             (EXTI15_10) => { $action!(EXTI15_10); };
             (EXTI15_4)  => { $action!(EXTI15_4); };
             (EXTI1_0)   => { $action!(EXTI1_0); };
@@ -315,18 +323,28 @@ macro_rules! foreach_exti_irq {
     };
 }
 
-macro_rules! impl_irq {
-    ($e:ident) => {
-        #[allow(non_snake_case)]
-        #[cfg(feature = "rt")]
-        #[interrupt]
-        unsafe fn $e() {
-            on_irq()
-        }
-    };
+///EXTI interrupt handler. All EXTI interrupt vectors should be bound to this handler.
+///
+/// It is generic over the [Interrupt](crate::interrupt::typelevel::Interrupt) rather
+/// than the [Instance](crate::exti::Instance) because it should not be bound multiple
+/// times to the same vector on chips which multiplex multiple EXTI interrupts into one vector.
+//
+// It technically doesn't need to be generic at all, except to satisfy the generic argument
+// of [Handler](crate::interrupt::typelevel::Handler). All EXTI interrupts eventually
+// land in the same on_irq() function.
+pub struct InterruptHandler<T: crate::interrupt::typelevel::Interrupt> {
+    _phantom: PhantomData<T>,
 }
 
-foreach_exti_irq!(impl_irq);
+impl<T: crate::interrupt::typelevel::Interrupt> crate::interrupt::typelevel::Handler<T> for InterruptHandler<T> {
+    unsafe fn on_interrupt() {
+        on_irq()
+    }
+}
+
+peri_trait!(
+    irqs: [Interrupt],
+);
 
 trait SealedChannel {}
 
@@ -352,8 +370,32 @@ impl Channel for AnyChannel {
     }
 }
 
+//State is empty because it makes more sense for the wakers to be in a static array.
+//Storing the wakers in the instance would make them difficult to access from the
+//monolithic on_irq() function.
+struct State {}
+
+#[allow(unused)]
+impl State {
+    const fn new() -> Self {
+        Self {}
+    }
+}
+
+struct Info {
+    #[allow(unused)]
+    regs: crate::pac::exti::Exti,
+}
+
 macro_rules! impl_exti {
     ($type:ident, $number:expr) => {
+        peri_trait_impl!(
+            $type,
+            Info {
+                regs: crate::pac::EXTI,
+            },
+            irqs: [(Interrupt, crate::_generated::peripheral_interrupts::EXTI::$type)],
+        );
         impl SealedChannel for peripherals::$type {}
         impl Channel for peripherals::$type {
             fn number(&self) -> PinNumber {
