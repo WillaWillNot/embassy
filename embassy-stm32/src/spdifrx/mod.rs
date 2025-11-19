@@ -259,7 +259,6 @@ struct Info {
 
 peri_trait!(
     irqs: [GlobalInterrupt],
-    super_traits: [crate::rcc::RccPeripheral],
 );
 
 /// SPIDFRX pin trait

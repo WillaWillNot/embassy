@@ -1410,7 +1410,7 @@ impl State {
     }
 }
 
-peri_trait!(super_traits: [crate::rcc::RccPeripheral],);
+peri_trait!();
 
 pin_trait!(SckPin, Instance, @A);
 pin_trait!(MosiPin, Instance, @A);
@@ -1427,7 +1427,7 @@ foreach_peripheral!(
         peri_trait_impl!($inst, Info {
             regs: crate::pac::$inst,
             rcc: crate::peripherals::$inst::RCC_INFO,
-        },);
+        });
     };
 );
 

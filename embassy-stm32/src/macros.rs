@@ -2,7 +2,7 @@
 
 macro_rules! peri_trait {
     (
-        $(irqs: [$($irq:ident),*],)? $(super_traits: [$($super_trait:path),*],)?
+        $(irqs: [$($irq:ident),*],)?
     ) => {
         #[allow(private_interfaces)]
         pub(crate) trait SealedInstance {
@@ -14,7 +14,7 @@ macro_rules! peri_trait {
 
         /// Peripheral instance trait.
         #[allow(private_bounds)]
-        pub trait Instance: SealedInstance + crate::PeripheralType $($(+ $super_trait)*)? {
+        pub trait Instance: SealedInstance + crate::PeripheralType  + crate::rcc::RccPeripheral {
             $($(
                 /// Interrupt for this peripheral.
                 type $irq: crate::interrupt::typelevel::Interrupt;
@@ -23,11 +23,8 @@ macro_rules! peri_trait {
     };
 }
 
-// $($(+ $super_trait)*)?
-// + crate::rcc::RccPeripheral
-
 macro_rules! peri_trait_impl {
-    ($instance:ident, $info:expr, $(irqs: [$(($int_type:ident, $int_vec:path)),*],)?) => {
+    ($instance:ident, $info:expr) => {
         #[allow(private_interfaces)]
         impl SealedInstance for crate::peripherals::$instance {
             fn info() -> &'static Info {
@@ -39,12 +36,7 @@ macro_rules! peri_trait_impl {
                 &STATE
             }
         }
-        impl Instance for crate::peripherals::$instance {
-            $($(
-                /// Interrupt for this peripheral.
-                type $int_type = $int_vec;
-            )*)?
-        }
+        impl Instance for crate::peripherals::$instance {}
     };
 }
 

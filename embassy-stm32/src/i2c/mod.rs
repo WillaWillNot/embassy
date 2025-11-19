@@ -21,11 +21,11 @@ pub use mode::{Master, MultiMaster};
 
 use crate::dma::ChannelAndRequest;
 use crate::gpio::{AnyPin, SealedPin as _};
-use crate::interrupt;
 use crate::interrupt::typelevel::Interrupt;
 use crate::mode::{Async, Blocking, Mode};
 use crate::rcc::{RccInfo, SealedRccPeripheral};
 use crate::time::Hertz;
+use crate::{interrupt, peripherals};
 
 /// I2C error.
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
@@ -200,8 +200,6 @@ impl<'d, M: Mode> I2c<'d, M, Master> {
         rx_dma: Option<ChannelAndRequest<'d>>,
         config: Config,
     ) -> Self {
-        #[allow(unused_imports)]
-        use crate::rcc::RccPeripheral; //needed to infer T: rcc::SealedRccPeripheral
         unsafe { T::EventInterrupt::enable() };
         unsafe { T::ErrorInterrupt::enable() };
 
@@ -297,7 +295,6 @@ struct Info {
 
 peri_trait!(
     irqs: [EventInterrupt, ErrorInterrupt],
-    super_traits: [crate::rcc::RccPeripheral],
 );
 
 pin_trait!(SclPin, Instance, @A);
@@ -329,15 +326,25 @@ impl<T: Instance> interrupt::typelevel::Handler<T::ErrorInterrupt> for ErrorInte
 
 foreach_peripheral!(
     (i2c, $inst:ident) => {
-        peri_trait_impl!(
-            $inst,
-            Info {
-                regs: crate::pac::$inst,
-                rcc: crate::peripherals::$inst::RCC_INFO,
-            },
-            irqs: [(EventInterrupt, crate::_generated::peripheral_interrupts::$inst::EV),
-                (ErrorInterrupt, crate::_generated::peripheral_interrupts::$inst::ER)],
-        );
+        #[allow(private_interfaces)]
+        impl SealedInstance for peripherals::$inst {
+            fn info() -> &'static Info {
+                static INFO: Info = Info{
+                    regs: crate::pac::$inst,
+                    rcc: crate::peripherals::$inst::RCC_INFO,
+                };
+                &INFO
+            }
+            fn state() -> &'static State {
+                static STATE: State = State::new();
+                &STATE
+            }
+        }
+
+        impl Instance for peripherals::$inst {
+            type EventInterrupt = crate::_generated::peripheral_interrupts::$inst::EV;
+            type ErrorInterrupt = crate::_generated::peripheral_interrupts::$inst::ER;
+        }
     };
 );
 
