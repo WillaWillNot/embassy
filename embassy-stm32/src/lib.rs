@@ -151,7 +151,7 @@ pub use crate::_generated::interrupt;
 /// Macro to bind interrupts to handlers.
 ///
 /// This defines the right interrupt handlers, and creates a unit struct (like `struct Irqs;`)
-/// and implements the right [`Binding`]s for it. You can pass this struct to drivers to
+/// and implements the right [`Binding`](crate::interrupt::typelevel::Binding)s for it. You can pass this struct to drivers to
 /// prove at compile-time that the right interrupts have been bound.
 ///
 /// Example of how to bind one interrupt:
@@ -195,6 +195,19 @@ macro_rules! bind_interrupts {
         $(#[$outer])*
         $vis struct $name;
 
+        impl $name {
+            #[doc = r"Convenience method to call Binding::into_any(). Unlike the trait method, can be called with a turbofish."]
+            pub fn as_any<
+                I: $crate::interrupt::typelevel::Interrupt,
+                H: $crate::interrupt::typelevel::Handler<I>
+            >() -> $crate::interrupt::typelevel::AnyBinding
+            where
+                Self: $crate::interrupt::typelevel::Binding<I, H>
+            {
+                <Self as $crate::interrupt::typelevel::Binding<I, H>>::into_any()
+            }
+        }
+
         $(
             #[allow(non_snake_case)]
             #[unsafe(no_mangle)]
@@ -211,7 +224,7 @@ macro_rules! bind_interrupts {
             }
 
             $(#[cfg($cond_irq)])?
-            $crate::bind_interrupts!(@inner
+            $crate::bind_interrupts!(@inner2
                 $(
                     $(#[cfg($cond_handler)])?
                     unsafe impl $crate::interrupt::typelevel::Binding<$crate::interrupt::typelevel::$irq, $handler> for $name {}
@@ -219,7 +232,7 @@ macro_rules! bind_interrupts {
             );
         )*
     };
-    (@inner $($t:tt)*) => {
+    (@inner2 $($t:tt)*) => {
         $($t)*
     }
 }
