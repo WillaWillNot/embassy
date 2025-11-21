@@ -224,7 +224,7 @@ macro_rules! bind_interrupts {
             }
 
             $(#[cfg($cond_irq)])?
-            $crate::bind_interrupts!(@inner2
+            $crate::bind_interrupts!(@inner
                 $(
                     $(#[cfg($cond_handler)])?
                     unsafe impl $crate::interrupt::typelevel::Binding<$crate::interrupt::typelevel::$irq, $handler> for $name {}
@@ -232,7 +232,7 @@ macro_rules! bind_interrupts {
             );
         )*
     };
-    (@inner2 $($t:tt)*) => {
+    (@inner $($t:tt)*) => {
         $($t)*
     }
 }

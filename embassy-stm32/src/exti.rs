@@ -411,8 +411,8 @@ impl Channel for AnyChannel {
 
 macro_rules! impl_exti {
     ($type:ident, $number:expr) => {
-        impl SealedChannel for peripherals::$type {}
-        impl Channel for peripherals::$type {
+        impl SealedChannel for crate::peripherals::$type {}
+        impl Channel for crate::peripherals::$type {
             fn number(&self) -> PinNumber {
                 $number
             }
@@ -421,8 +421,8 @@ macro_rules! impl_exti {
             }
             type INTERRUPT = crate::_generated::peripheral_interrupts::EXTI::$type;
         }
-        impl From<peripherals::$type> for AnyChannel {
-            fn from(_val: peripherals::$type) -> Self {
+        impl From<crate::peripherals::$type> for AnyChannel {
+            fn from(_val: crate::peripherals::$type) -> Self {
                 Self {
                     number: $number,
                     irq: crate::_generated::peripheral_interrupts::EXTI::$type::IRQ,
