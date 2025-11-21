@@ -14,7 +14,7 @@ use crate::interrupt::Interrupt as InterruptEnum;
 use crate::interrupt::typelevel::{AnyBinding, Handler, HandlerType, Interrupt as InterruptType, PrivateHandlerType};
 use crate::pac::EXTI;
 use crate::pac::exti::regs::Lines;
-use crate::{Peri, pac, peripherals};
+use crate::{Peri, pac};
 
 const EXTI_COUNT: usize = 16;
 static EXTI_WAKERS: [AtomicWaker; EXTI_COUNT] = [const { AtomicWaker::new() }; EXTI_COUNT];
@@ -411,21 +411,27 @@ impl Channel for AnyChannel {
 
 macro_rules! impl_exti {
     ($type:ident, $number:expr) => {
+        impl_exti!(@inner $type, $number, crate::_generated::peripheral_interrupts::EXTI::$type);
+    };
+    ($type:ident, $number:expr, @tsc) => {
+        impl_exti!(@inner $type, $number, crate::_generated::peripheral_interrupts::TSC::GLOBAL);
+    };
+    (@inner $type:ident, $number:expr, $irq:path) => {
         impl SealedChannel for crate::peripherals::$type {}
         impl Channel for crate::peripherals::$type {
             fn number(&self) -> PinNumber {
                 $number
             }
             fn irq(&self) -> InterruptEnum {
-                crate::_generated::peripheral_interrupts::EXTI::$type::IRQ
+                <$irq>::IRQ
             }
-            type INTERRUPT = crate::_generated::peripheral_interrupts::EXTI::$type;
+            type INTERRUPT = $irq;
         }
         impl From<crate::peripherals::$type> for AnyChannel {
             fn from(_val: crate::peripherals::$type) -> Self {
                 Self {
                     number: $number,
-                    irq: crate::_generated::peripheral_interrupts::EXTI::$type::IRQ,
+                    irq: <$irq>::IRQ,
                 }
             }
         }
@@ -434,7 +440,10 @@ macro_rules! impl_exti {
 
 impl_exti!(EXTI0, 0);
 impl_exti!(EXTI1, 1);
+#[cfg(not(any(tsc, unimpl_tsc)))]
 impl_exti!(EXTI2, 2);
+#[cfg(any(tsc, unimpl_tsc))]
+impl_exti!(EXTI2, 2, @tsc);
 impl_exti!(EXTI3, 3);
 impl_exti!(EXTI4, 4);
 impl_exti!(EXTI5, 5);
