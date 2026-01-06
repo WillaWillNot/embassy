@@ -1,10 +1,12 @@
 use core::cmp;
 use core::future::poll_fn;
-use core::task::Poll;
+use core::pin::Pin;
+use core::task::{Context, Poll, Waker};
 
 use config::{Address, OA2, OwnAddresses};
 use embassy_embedded_hal::SetConfig;
 use embassy_hal_internal::drop::OnDrop;
+use embassy_sync::channel::Channel as SyncChannel;
 use embedded_hal_1::i2c::Operation;
 use mode::{Master, MultiMaster};
 use stm32_metapac::i2c::vals::{Addmode, Oamsk};
@@ -1741,6 +1743,80 @@ impl<'d, M: Mode> I2c<'d, M, MultiMaster> {
     }
 }
 
+pub struct BidirectionalSlaveListenerFuture<'a> {
+    //Unfortunately cannot borrow &mut I2c to get access to its utility functions,
+    //because the ring buffers hold mutable split-borrows to fields within I2c
+    info: &'static Info,
+    state: &'static State,
+}
+
+pub struct BidirectionalSlaveListener<'a> {
+    pub future: BidirectionalSlaveListenerFuture<'a>,
+    pub writes: crate::dma::ReadableRingBuffer<'a, u8>,
+    pub reads: crate::dma::WritableRingBuffer<'a, u8>,
+}
+impl<'a> Drop for BidirectionalSlaveListener<'a> {
+    fn drop(&mut self) {
+        self.info.regs.cr1().modify(|w| {
+            w.set_rxdmaen(false);
+            w.set_txdmaen(false);
+            w.set_stopie(false);
+            w.set_tcie(false);
+        });
+        self.info.regs.isr().write(|w| w.set_txe(true));
+    }
+}
+
+impl<'a> Future for BidirectionalSlaveListenerFuture<'a> {
+    type Output = Result<SlaveCommand, Error>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.state.waker.register(cx.waker());
+        let isr = self.info.regs.isr().read();
+        let command: SlaveCommand = if !isr.addr() {
+            return Poll::Pending;
+        } else {
+            trace!("ADDR triggered (address match)");
+            // we do not clear the address flag here as it will be cleared by the dma read/write
+            // if we clear it here the clock stretching will stop and the master will read in data before the slave is ready to send it
+            let isr = self.info.regs.isr().read();
+
+            let matched = isr.addcode();
+
+            let matched_address = if matched >> 3 == 0b11110 {
+                // is 10-bit address and we need to get the other 8 bits from the rxdr
+                // we do this by doing a blocking read of 1 byte
+
+                //TODO: how to do a target read without an I2c borrow?
+                //let mut buffer = [0];
+                //self.slave_read_internal(&mut buffer, self.timeout())?;
+                Address::TenBit((matched as u16) << 6 | buffer[0] as u16)
+            } else {
+                Address::SevenBit(matched)
+            };
+            match isr.dir() {
+                i2c::vals::Dir::WRITE => {
+                    trace!("DIR: write");
+                    SlaveCommand {
+                        kind: SlaveCommandKind::Write,
+                        address: matched_address,
+                    }
+                }
+                i2c::vals::Dir::READ => {
+                    trace!("DIR: read");
+                    SlaveCommand {
+                        kind: SlaveCommandKind::Read,
+                        address: matched_address,
+                    }
+                }
+            }
+        };
+
+        //TODO
+        Poll::Pending
+    }
+}
+
 impl<'d> I2c<'d, Async, MultiMaster> {
     /// Listen for incoming I2C messages.
     ///
@@ -1782,6 +1858,70 @@ impl<'d> I2c<'d, Async, MultiMaster> {
         let _scoped_block_stop = self.info.rcc.block_stop();
         let timeout = self.timeout();
         timeout.with(self.write_dma_internal_slave(write, timeout)).await
+    }
+
+    /// Listen for reads and writes from an I2C master, and service them continously. Returns a future
+    async fn listen_bidir_dma_slave<'peri, 'r, 'w, 'fut>(
+        &'peri mut self,
+        read_buffer: &'r mut [u8],
+        write_buffer: &'w mut [u8],
+        min_read_fill: usize,
+        min_write_headroom: usize,
+    ) -> BidirectionalSlaveListener<'fut>
+    where
+        'd: 'fut,
+        'peri: 'fut,
+        'r: 'fut,
+        'w: 'fut,
+    {
+        let regs = self.info.regs;
+
+        let write_dma_buffer = unsafe {
+            regs.cr1().modify(|w| {
+                w.set_rxdmaen(true);
+            });
+            let src = regs.rxdr().as_ptr() as *mut u8;
+
+            let tx_dma: &'fut mut ChannelAndRequest<'d> = self.tx_dma.as_mut().unwrap();
+
+            crate::dma::ReadableRingBuffer::<u8>::new(
+                tx_dma.channel.reborrow(),
+                tx_dma.request,
+                src,
+                write_buffer,
+                Default::default(),
+            )
+        };
+        let read_dma_buffer = unsafe {
+            regs.cr1().modify(|w| {
+                w.set_txdmaen(true);
+            });
+            let dst = regs.txdr().as_ptr() as *mut u8;
+
+            let rx_dma: &'fut mut ChannelAndRequest<'d> = self.rx_dma.as_mut().unwrap();
+
+            crate::dma::WritableRingBuffer::<u8>::new(
+                rx_dma.channel.reborrow(),
+                rx_dma.request,
+                dst,
+                read_buffer,
+                Default::default(),
+            )
+        };
+
+        regs.cr1().modify(|w| {
+            w.set_stopie(true);
+            w.set_tcie(true);
+        });
+
+        BidirectionalSlaveListener::<'fut> {
+            future: BidirectionalSlaveListenerFuture {
+                info: self.info,
+                state: self.state,
+            },
+            writes: write_dma_buffer,
+            reads: read_dma_buffer,
+        }
     }
 
     // for data reception in slave mode

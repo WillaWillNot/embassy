@@ -45,6 +45,8 @@ pub enum Error {
     Overrun,
     /// Zero-length transfers are not allowed.
     ZeroLengthTransfer,
+    /// Bidirectional DMA transfers must have equal buffer lengths.
+    BidirectionalBufferLengthMismatch,
 }
 
 impl core::fmt::Display for Error {
