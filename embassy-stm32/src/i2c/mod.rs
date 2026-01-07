@@ -10,6 +10,7 @@ mod config;
 use core::future::Future;
 use core::iter;
 use core::marker::PhantomData;
+use core::sync::atomic::AtomicBool;
 
 pub use config::*;
 use embassy_hal_internal::Peri;
@@ -45,6 +46,8 @@ pub enum Error {
     Overrun,
     /// Zero-length transfers are not allowed.
     ZeroLengthTransfer,
+    /// Read and write transfers must be the same length when prepared simultaneously.
+    MismatchedTransferLength,
 }
 
 impl core::fmt::Display for Error {
@@ -57,6 +60,9 @@ impl core::fmt::Display for Error {
             Self::Crc => "CRC Mismatch",
             Self::Overrun => "Buffer Overrun",
             Self::ZeroLengthTransfer => "Zero-Length Transfers are not allowed",
+            Self::MismatchedTransferLength => {
+                "Read and write transfers must be the same length when prepared simultaneously"
+            }
         };
 
         write!(f, "{}", message)
@@ -113,6 +119,21 @@ pub enum SendStatus {
     Done,
     /// The slave send operation is done, but there are leftover bytes that the master did not read
     LeftoverBytes(usize),
+}
+
+/// Result of a prepared listen, which can be either a read or a write
+#[cfg(any(i2c_v2, i2c_v3))]
+pub enum ListenOutcome {
+    /// Completed slave read operation
+    Read {
+        /// Number of bytes read by the master
+        bytes_transmitted: usize,
+    },
+    /// Completed slave write operation
+    Write {
+        /// Number of bytes written by the master
+        bytes_received: usize,
+    },
 }
 
 struct I2CDropGuard<'d> {
@@ -278,12 +299,17 @@ impl Timeout {
 struct State {
     #[allow(unused)]
     waker: AtomicWaker,
+    #[allow(unused)]
+    #[cfg(any(i2c_v2, i2c_v3))]
+    slave_addr_autoclear: AtomicBool,
 }
 
 impl State {
     const fn new() -> Self {
         Self {
             waker: AtomicWaker::new(),
+            #[cfg(any(i2c_v2, i2c_v3))]
+            slave_addr_autoclear: AtomicBool::new(false),
         }
     }
 }
@@ -309,6 +335,7 @@ pub struct EventInterruptHandler<T: Instance> {
 
 impl<T: Instance> interrupt::typelevel::Handler<T::EventInterrupt> for EventInterruptHandler<T> {
     unsafe fn on_interrupt() {
+        trace!("Event: {}", T::info().regs.as_ptr() as usize);
         _version::on_interrupt::<T>()
     }
 }
@@ -320,6 +347,7 @@ pub struct ErrorInterruptHandler<T: Instance> {
 
 impl<T: Instance> interrupt::typelevel::Handler<T::ErrorInterrupt> for ErrorInterruptHandler<T> {
     unsafe fn on_interrupt() {
+        trace!("Error: {}", T::info().regs.as_ptr() as usize);
         _version::on_interrupt::<T>()
     }
 }
@@ -384,6 +412,7 @@ impl embedded_hal_1::i2c::Error for Error {
             Self::Crc => embedded_hal_1::i2c::ErrorKind::Other,
             Self::Overrun => embedded_hal_1::i2c::ErrorKind::Overrun,
             Self::ZeroLengthTransfer => embedded_hal_1::i2c::ErrorKind::Other,
+            Self::MismatchedTransferLength => embedded_hal_1::i2c::ErrorKind::Other,
         }
     }
 }

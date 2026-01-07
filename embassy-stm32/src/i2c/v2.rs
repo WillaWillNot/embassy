@@ -1,5 +1,6 @@
 use core::cmp;
 use core::future::poll_fn;
+use core::sync::atomic::Ordering;
 use core::task::Poll;
 
 use config::{Address, OA2, OwnAddresses};
@@ -44,28 +45,28 @@ enum ReceiveResult {
 
 fn debug_print_interrupts(isr: stm32_metapac::i2c::regs::Isr) {
     if isr.tcr() {
-        trace!("interrupt: tcr");
+        info!("interrupt: tcr");
     }
     if isr.tc() {
-        trace!("interrupt: tc");
+        info!("interrupt: tc");
     }
     if isr.addr() {
-        trace!("interrupt: addr");
+        info!("interrupt: addr");
     }
     if isr.stopf() {
-        trace!("interrupt: stopf");
+        info!("interrupt: stopf");
     }
     if isr.nackf() {
-        trace!("interrupt: nackf");
+        info!("interrupt: nackf");
     }
     if isr.berr() {
-        trace!("interrupt: berr");
+        info!("interrupt: berr");
     }
     if isr.arlo() {
-        trace!("interrupt: arlo");
+        info!("interrupt: arlo");
     }
     if isr.ovr() {
-        trace!("interrupt: ovr");
+        info!("interrupt: ovr");
     }
 }
 
@@ -77,24 +78,51 @@ pub(crate) unsafe fn on_interrupt<T: Instance>() {
 
     let regs = T::info().regs;
     let isr = regs.isr().read();
+    let state = T::state();
+
+    info!("INTERRUPT: {}", regs.isr().read());
 
     if isr.tcr() || isr.tc() || isr.addr() || isr.stopf() || isr.nackf() || isr.berr() || isr.arlo() || isr.ovr() {
         debug_print_interrupts(isr);
 
-        T::state().waker.wake();
+        state.waker.wake();
+    } else if isr.txe() {
+        trace!("TXE only interrupt!?");
+        return;
     }
 
     critical_section::with(|_| {
-        regs.cr1().modify(|w| {
-            w.set_addrie(false);
-            w.set_stopie(false);
-            // The flag can only be cleared by writting to nbytes, we won't do that here
-            w.set_tcie(false);
-            // Error flags are to be read in the routines, so we also don't clear them here
-            w.set_nackie(false);
-            w.set_errie(false);
-        });
+        if isr.addr() && state.slave_addr_autoclear.load(Ordering::Relaxed) {
+            //Leave tcie and stopie alone if we're autoclearing addr
+            info!("autoclear; CR1: {:#X}", regs.cr1().read());
+            info!("autoclear; CR2: {:#X}", regs.cr2().read());
+            info!("autoclear; ISR: {:#X}", regs.isr().read());
+            regs.cr1().modify(|w| {
+                w.set_addrie(false);
+                w.set_nackie(false);
+                w.set_errie(false);
+
+                w.set_stopie(false);
+                w.set_tcie(false);
+            });
+            state.slave_addr_autoclear.store(false, Ordering::Relaxed);
+            regs.icr().modify(|w| {
+                w.set_addrcf(true);
+            });
+        } else {
+            //Otherwise clear all interrupt enables as usual
+            regs.cr1().modify(|w| {
+                w.set_addrie(false);
+                w.set_stopie(false);
+                // The flag can only be cleared by writting to nbytes, we won't do that here
+                w.set_tcie(false);
+                // Error flags are to be read in the routines, so we also don't clear them here
+                w.set_nackie(false);
+                w.set_errie(false);
+            });
+        }
     });
+    trace!("Out of critical section");
 }
 
 impl<'d, M: Mode, IM: MasterMode> I2c<'d, M, IM> {
@@ -123,6 +151,10 @@ impl<'d, M: Mode, IM: MasterMode> I2c<'d, M, IM> {
         self.info.regs.cr1().modify(|reg| {
             reg.set_pe(false);
             reg.set_anfoff(false);
+        });
+
+        self.info.regs.cr1().modify(|reg| {
+            reg.set_dnf(i2c::vals::Dnf::FILTER8);
         });
 
         let timings = Timings::new(self.kernel_clock, config.frequency.into());
@@ -1782,6 +1814,142 @@ impl<'d> I2c<'d, Async, MultiMaster> {
         let _scoped_block_stop = self.info.rcc.block_stop();
         let timeout = self.timeout();
         timeout.with(self.write_dma_internal_slave(write, timeout)).await
+    }
+
+    /// Listen for reads and writes from an I2C master, and service the next transaction
+    /// instantly using one of the two supplied buffers. SBC is disabled and the clock is
+    /// not stretched after address match.
+    ///
+    /// read_buffer and write_buffer must be the same length, which is used to program
+    /// NBYTES. The transaction will be terminated by NACK after NBYTES are received or
+    /// transmitted.
+    pub async fn prepared_listen(
+        &mut self,
+        read_buffer: &[u8],
+        write_buffer: &mut [u8],
+    ) -> Result<ListenOutcome, Error> {
+        trace!("Prepared listen");
+        let regs = self.info.regs;
+
+        if read_buffer.len() != write_buffer.len() {
+            return Err(Error::MismatchedTransferLength);
+        }
+        let total_len = read_buffer.len();
+        let mut remaining_len = total_len;
+
+        let mut read_dma_transfer = unsafe {
+            regs.cr1().modify(|w| {
+                w.set_txdmaen(true);
+            });
+
+            let dst = regs.txdr().as_ptr() as *mut u8;
+            self.tx_dma
+                .as_mut()
+                .unwrap()
+                .write(read_buffer, dst, Default::default())
+        };
+        let mut write_dma_transfer = unsafe {
+            regs.cr1().modify(|w| {
+                w.set_rxdmaen(true);
+            });
+
+            let src = regs.rxdr().as_ptr() as *mut u8;
+            self.rx_dma
+                .as_mut()
+                .unwrap()
+                .read(src, write_buffer, Default::default())
+        };
+
+        regs.cr1().modify(|w| {
+            w.set_stopie(true);
+            w.set_tcie(true);
+        });
+
+        let on_drop = OnDrop::new(|| {
+            regs.cr1().modify(|w| {
+                w.set_txdmaen(false);
+                w.set_rxdmaen(false);
+                w.set_stopie(false);
+                w.set_tcie(false);
+                w.set_addrie(false);
+            });
+            regs.isr().write(|w| w.set_txe(true));
+            trace!("Drop prepared listen");
+        });
+
+        let outcome = poll_fn(|cx| {
+            self.state.waker.register(cx.waker());
+
+            let isr = self.info.regs.isr().read();
+
+            if remaining_len == total_len {
+                remaining_len = remaining_len.saturating_sub(255);
+                self.state.slave_addr_autoclear.store(true, Ordering::Relaxed);
+                regs.cr2().modify(|w| {
+                    w.set_nbytes(total_len.min(255) as u8);
+                    w.set_reload(Self::to_reload(total_len > 255));
+                });
+                regs.cr1().modify(|w| {
+                    w.set_addrie(true);
+                });
+                trace!("Enable ADDRIE with autoclear");
+                debug!("CR1: {}", regs.cr1().read());
+                debug!("CR2: {}", regs.cr2().read());
+                debug!("ISR: {}", regs.isr().read());
+                debug!("ICR: {}", regs.icr().read());
+                debug!(
+                    "DMA status: {}, {}",
+                    read_dma_transfer.is_running(),
+                    write_dma_transfer.is_running()
+                );
+                Poll::Pending
+            } else if isr.tcr() {
+                info!("TCR");
+                regs.cr2().modify(|w| {
+                    w.set_nbytes(remaining_len.min(255) as u8);
+                    w.set_reload(Self::to_reload(remaining_len > 255));
+                });
+                remaining_len = remaining_len.saturating_sub(255);
+                self.info.regs.cr1().modify(|w| w.set_tcie(true));
+                Poll::Pending
+            } else if isr.stopf() {
+                info!("STOPF");
+                let isr = self.info.regs.isr().read();
+                let mut leftover_reads = read_dma_transfer.get_remaining_transfers() as usize;
+                let leftover_writes = write_dma_transfer.get_remaining_transfers() as usize;
+                if !isr.txe() {
+                    leftover_reads = leftover_reads.saturating_add(1);
+                }
+                let outcome = match leftover_reads.cmp(&leftover_writes) {
+                    cmp::Ordering::Less => Ok(ListenOutcome::Read {
+                        bytes_transmitted: total_len.saturating_sub(leftover_reads.saturating_add(remaining_len)),
+                    }),
+                    cmp::Ordering::Greater => Ok(ListenOutcome::Write {
+                        bytes_received: total_len.saturating_sub(leftover_writes.saturating_add(remaining_len)),
+                    }),
+                    cmp::Ordering::Equal => match isr.dir() {
+                        //The dir bit isn't as reliable because it could be overwritten by another addr match
+                        //so we only fall back on it when we can't tell from DMA
+                        i2c::vals::Dir::READ => Ok(ListenOutcome::Read { bytes_transmitted: 0 }),
+                        i2c::vals::Dir::WRITE => Ok(ListenOutcome::Write { bytes_received: 0 }),
+                    },
+                };
+                self.info.regs.icr().write(|reg| reg.set_stopcf(true));
+                Poll::Ready(outcome)
+            } else {
+                Poll::Pending
+            }
+        })
+        .await?;
+
+        read_dma_transfer.request_reset();
+        write_dma_transfer.request_reset();
+        read_dma_transfer.await;
+        write_dma_transfer.await;
+
+        drop(on_drop);
+
+        Ok(outcome)
     }
 
     // for data reception in slave mode
