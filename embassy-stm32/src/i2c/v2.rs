@@ -101,9 +101,6 @@ pub(crate) unsafe fn on_interrupt<T: Instance>() {
                 w.set_addrie(false);
                 w.set_nackie(false);
                 w.set_errie(false);
-
-                w.set_stopie(false);
-                w.set_tcie(false);
             });
             state.slave_addr_autoclear.store(false, Ordering::Relaxed);
             regs.icr().modify(|w| {

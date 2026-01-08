@@ -335,6 +335,9 @@ pub struct EventInterruptHandler<T: Instance> {
 
 impl<T: Instance> interrupt::typelevel::Handler<T::EventInterrupt> for EventInterruptHandler<T> {
     unsafe fn on_interrupt() {
+        // T::info().regs.icr().modify(|w| {
+        //     w.set_addrcf(true);
+        // });
         trace!("Event: {}", T::info().regs.as_ptr() as usize);
         _version::on_interrupt::<T>()
     }
@@ -347,8 +350,8 @@ pub struct ErrorInterruptHandler<T: Instance> {
 
 impl<T: Instance> interrupt::typelevel::Handler<T::ErrorInterrupt> for ErrorInterruptHandler<T> {
     unsafe fn on_interrupt() {
-        trace!("Error: {}", T::info().regs.as_ptr() as usize);
-        _version::on_interrupt::<T>()
+        // trace!("Error: {}", T::info().regs.as_ptr() as usize);
+        // _version::on_interrupt::<T>()
     }
 }
 
