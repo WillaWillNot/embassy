@@ -78,48 +78,61 @@ pub(crate) unsafe fn on_interrupt<T: Instance>() {
 
     let regs = T::info().regs;
     let isr = regs.isr().read();
+
+    // regs.icr().modify(|w| {
+    //     w.set_addrcf(true);
+    // });
+
     let state = T::state();
 
-    info!("INTERRUPT: {}", regs.isr().read());
+    // info!("INTERRUPT: {}", regs.isr().read());
 
     if isr.tcr() || isr.tc() || isr.addr() || isr.stopf() || isr.nackf() || isr.berr() || isr.arlo() || isr.ovr() {
         debug_print_interrupts(isr);
 
         state.waker.wake();
     } else if isr.txe() {
-        trace!("TXE only interrupt!?");
+        // trace!("TXE only interrupt!?");
         return;
     }
 
+    //Interrupt may be triggered while thread mode is expecting multiple interrupts, and some chips
+    //multiplex the event and error interrupts in such a way that we'll see two calls to this function for
+    //every real interrupt if the user is configuring interrupts with bind_interrupts!{}. So we can only clear
+    //the IEs that correspond to interrupts that we know thread mode code will see when it wakes
+    //(which are also the interrupts that would re-fire if we don't clear them.)
     critical_section::with(|_| {
+        regs.cr1().modify(|w| {
+            if isr.addr() {
+                w.set_addrie(false);
+            }
+            if isr.stopf() {
+                w.set_stopie(false);
+            }
+            // The flag can only be cleared by writting to nbytes, we won't do that here
+            if isr.tcr() || isr.tc() {
+                w.set_tcie(false);
+            }
+            // Error flags are to be read in the routines, so we also don't clear them here
+            if isr.nackf() {
+                w.set_nackie(false);
+            }
+            if isr.berr() || isr.arlo() || isr.ovr() {
+                w.set_errie(false);
+            }
+        });
+
         if isr.addr() && state.slave_addr_autoclear.load(Ordering::Relaxed) {
             //Leave tcie and stopie alone if we're autoclearing addr
-            info!("autoclear; CR1: {:#X}", regs.cr1().read());
-            info!("autoclear; CR2: {:#X}", regs.cr2().read());
-            info!("autoclear; ISR: {:#X}", regs.isr().read());
-            regs.cr1().modify(|w| {
-                w.set_addrie(false);
-                w.set_nackie(false);
-                w.set_errie(false);
-            });
+            // info!("autoclear; CR1: {:#X}", regs.cr1().read());
+            // info!("autoclear; CR2: {:#X}", regs.cr2().read());
+            // info!("autoclear; ISR: {:#X}", regs.isr().read());
             state.slave_addr_autoclear.store(false, Ordering::Relaxed);
             regs.icr().modify(|w| {
                 w.set_addrcf(true);
             });
-        } else {
-            //Otherwise clear all interrupt enables as usual
-            regs.cr1().modify(|w| {
-                w.set_addrie(false);
-                w.set_stopie(false);
-                // The flag can only be cleared by writting to nbytes, we won't do that here
-                w.set_tcie(false);
-                // Error flags are to be read in the routines, so we also don't clear them here
-                w.set_nackie(false);
-                w.set_errie(false);
-            });
         }
     });
-    trace!("Out of critical section");
 }
 
 impl<'d, M: Mode, IM: MasterMode> I2c<'d, M, IM> {
@@ -1885,6 +1898,7 @@ impl<'d> I2c<'d, Async, MultiMaster> {
                 regs.cr2().modify(|w| {
                     w.set_nbytes(total_len.min(255) as u8);
                     w.set_reload(Self::to_reload(total_len > 255));
+                    w.set_nack(false);
                 });
                 regs.cr1().modify(|w| {
                     w.set_addrie(true);
